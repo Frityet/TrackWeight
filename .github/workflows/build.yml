@@ -1,0 +1,99 @@
+name: Build & Package TrackWeight (.app + zip)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x86_64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure App Sandbox is OFF
+        run: |
+          ENTITLEMENTS_FILE=$(git ls-files | grep -E '\.entitlements$' || true)
+          if [[ -n "$ENTITLEMENTS_FILE" ]]; then
+            /usr/libexec/PlistBuddy -c "Delete :com.apple.security.app-sandbox" "$ENTITLEMENTS_FILE" || true
+          fi
+
+      - name: Build ${{ matrix.arch }} slice
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.7"
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -scheme TrackWeight \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            ONLY_ACTIVE_ARCH=YES \
+            ARCHS=${{ matrix.arch }} \
+            BUILD_DIR="$PWD/build/${{ matrix.arch }}" \
+            build
+
+      - name: Copy .app to dist folder
+        run: |
+          APP_SRC=$(find build/${{ matrix.arch }}/Release -name "TrackWeight.app" -maxdepth 1 -type d)
+          mkdir -p dist/${{ matrix.arch }}
+          cp -R "$APP_SRC" "dist/${{ matrix.arch }}/"
+
+      - name: Upload per‑arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrackWeight-${{ matrix.arch }}
+          path: dist/${{ matrix.arch }}/TrackWeight.app
+
+  universal:
+    needs: build
+    runs-on: macos-14
+    steps:
+      - name: Download x86_64 app
+        uses: actions/download-artifact@v4
+        with:
+          name: TrackWeight-x86_64
+          path: dist/x86_64
+
+      - name: Download arm64 app
+        uses: actions/download-artifact@v4
+        with:
+          name: TrackWeight-arm64
+          path: dist/arm64
+
+      - name: Create universal binary with lipo
+        run: |
+          set -euo pipefail
+          APP_X86="dist/x86_64/TrackWeight.app"
+          APP_ARM="dist/arm64/TrackWeight.app"
+          APP_UNI="dist/universal/TrackWeight.app"
+
+          # copy one bundle as the template
+          mkdir -p dist/universal
+          cp -R "$APP_X86" "$APP_UNI"
+
+          # fuse the binaries inside Contents/MacOS/
+          BIN_PATH="Contents/MacOS/TrackWeight"
+          lipo -create \
+            "$APP_X86/$BIN_PATH" \
+            "$APP_ARM/$BIN_PATH" \
+            -output "$APP_UNI/$BIN_PATH"
+
+      - name: Zip the universal .app
+        run: |
+          cd dist/universal
+          ditto -c -k --sequesterRsrc --keepParent TrackWeight.app TrackWeight-universal.zip
+
+      - name: Upload universal artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrackWeight-universal
+          path: dist/universal/TrackWeight-universal.zip
